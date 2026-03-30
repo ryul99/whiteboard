@@ -529,4 +529,4 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "mcp", extras = ["cli"], specifier = ">=1.26.0" }]
+requires-dist = [{ name = "mcp", extras = ["cli"], specifier = "~=1.0" }]
