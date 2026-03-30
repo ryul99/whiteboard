@@ -8,12 +8,12 @@ Custom LM class with two modes:
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass, field
 
 from openai import OpenAI
+from pydantic import BaseModel, Field
 from lm_eval.api.model import LM
 
 logger = logging.getLogger(__name__)
@@ -22,36 +22,15 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 # Structured output schema
 # ------------------------------------------------------------------
-INTERLEAVED_SCHEMA = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "interleaved_response",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "thought": {
-                    "type": "string",
-                    "description": "Internal reasoning (hidden from user)",
-                },
-                "answer": {
-                    "type": "string",
-                    "description": "The answer to present (exact answer label like A, B, C, D or the answer text)",
-                },
-                "confidence": {
-                    "type": "number",
-                    "description": "Self-assessed confidence 0.0-1.0",
-                },
-                "confidence_reason": {
-                    "type": "string",
-                    "description": "Why this confidence level (e.g. 'direct calculation' vs 'guessing')",
-                },
-            },
-            "required": ["thought", "answer", "confidence", "confidence_reason"],
-            "additionalProperties": False,
-        },
-    },
-}
+class InterleavedResponse(BaseModel):
+    thought: str = Field(description="Internal reasoning (hidden from user)")
+    answer: str = Field(
+        description="The answer to present (exact answer label like A, B, C, D or the answer text)"
+    )
+    confidence: float = Field(description="Self-assessed confidence 0.0-1.0")
+    confidence_reason: str = Field(
+        description="Why this confidence level (e.g. 'direct calculation' vs 'guessing')"
+    )
 
 
 @dataclass
@@ -136,8 +115,12 @@ class ChatLMBase(LM):
             kwargs["temperature"] = temperature
         return kwargs
 
-    def _call_api(self, messages: list[dict], **kwargs) -> dict:
-        """Single API call with rate limit retry."""
+    def _call_api(self, messages: list[dict], **kwargs):
+        """Single API call with rate limit retry.
+
+        Pass text_format=SomePydanticModel to use responses.parse()
+        and get response.output_parsed as a typed Pydantic instance.
+        """
         api_kwargs = dict(
             model=self.model_name,
             input=messages,
@@ -148,25 +131,20 @@ class ChatLMBase(LM):
             api_kwargs["max_output_tokens"] = kwargs.pop("max_tokens")
         if "temperature" in kwargs:
             api_kwargs["temperature"] = kwargs.pop("temperature")
-        if "response_format" in kwargs:
-            fmt = kwargs.pop("response_format")
-            if fmt.get("type") == "json_schema" and "json_schema" in fmt:
-                js = fmt["json_schema"]
-                api_kwargs["text"] = {
-                    "format": {
-                        "type": "json_schema",
-                        "name": js["name"],
-                        "strict": js.get("strict", True),
-                        "schema": js["schema"],
-                    }
-                }
-            else:
-                api_kwargs["text"] = {"format": fmt}
+
+        # Determine whether to use responses.parse() or responses.create()
+        text_format = kwargs.pop("text_format", None)
+        if text_format is not None:
+            api_kwargs["text_format"] = text_format
+            call_fn = self.client.responses.parse
+        else:
+            call_fn = self.client.responses.create
+
         api_kwargs.update(kwargs)
 
         for attempt in range(5):
             try:
-                response = self.client.responses.create(**api_kwargs)
+                response = call_fn(**api_kwargs)
                 self.stats.total_calls += 1
 
                 if response.usage:
@@ -304,19 +282,17 @@ class InterleavedChatLM(ChatLMBase):
                     **self._api_kwargs(
                         self.retry_temperature if retries > 0 else self.temperature,
                         max_tokens=self.max_tokens,
-                        response_format=INTERLEAVED_SCHEMA,
+                        text_format=InterleavedResponse,
                     ),
                 )
 
-                raw = response.output_text or "{}"
-                parsed = json.loads(raw)
+                parsed = response.output_parsed
+                thought = parsed.thought
+                answer = parsed.answer
+                confidence = parsed.confidence
+                reason = parsed.confidence_reason
 
-                thought = parsed.get("thought", "")
-                answer = parsed.get("answer", "")
-                confidence = float(parsed.get("confidence", 0.0))
-                reason = parsed.get("confidence_reason", "")
-
-            except (json.JSONDecodeError, KeyError, TypeError) as e:
+            except Exception as e:
                 logger.warning(f"Failed to parse structured output: {e}")
                 # Fallback to plain call if structured output fails
                 fallback_response = self._call_api(
