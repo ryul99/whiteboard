@@ -237,12 +237,7 @@ class InterleavedChatLM(ChatLMBase):
         self.retry_temperature = retry_temperature
 
         # Append confidence guide to system prompt
-        self.developer_prompt = (
-            self.developer_prompt
-            + "\n\n"
-            + confidence_guide
-            + "\n\nYou must respond in the exact JSON format requested."
-        )
+        self.developer_prompt = self.developer_prompt + "\n\n" + confidence_guide
 
     def generate(self, prompt: str, until: list[str] | None = None) -> str:
         messages = [
