@@ -294,7 +294,7 @@ class InterleavedChatLM(ChatLMBase):
                 logger.warning(f"Failed to parse structured output: {e}")
                 # Fallback to plain call if structured output fails
                 fallback_response = self._call_api(
-                    messages,
+                    call_messages,
                     **self._api_kwargs(self.temperature, max_tokens=self.max_tokens),
                 )
                 answer = fallback_response.output_text or ""
