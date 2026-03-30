@@ -7,14 +7,14 @@ model:
   # OpenAI-compatible API endpoint
   api_base: null  # null = default OpenAI, or "http://localhost:8000/v1"
   model_name: "gpt-5-mini"
-  temperature: 0.0           # baseline temperature
+  temperature: null          # null = use model default
   max_tokens: 1024           # max tokens per call
 
 # --- Interleaved reasoning settings ---
 interleaved:
   confidence_threshold: 0.7  # re-think if confidence < this
   max_retries: 2             # max re-think attempts per chunk
-  retry_temperature: 0.3     # slightly higher temp for diversity on retry
+  retry_temperature: null    # null = use model default
 
   # Confidence calibration prompt (injected into system prompt)
   confidence_guide: |
@@ -28,7 +28,7 @@ interleaved:
 # --- Evaluation tasks ---
 # lm-evaluation-harness task names
 tasks:
-  - gpqa_diamond_zeroshot
+  - gpqa_diamond_cot_zeroshot
   # - gpqa_main_zeroshot
   # - mmlu
   # - arc_challenge

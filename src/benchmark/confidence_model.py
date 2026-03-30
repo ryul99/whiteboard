@@ -106,7 +106,7 @@ class ChatLMBase(LM):
         model_name: str = "gpt-4o-mini",
         api_base: str | None = None,
         api_key: str | None = None,
-        temperature: float = 0.0,
+        temperature: float | None = None,
         max_tokens: int = 1024,
         system_prompt: str | None = None,
     ):
@@ -128,8 +128,18 @@ class ChatLMBase(LM):
         self.client = OpenAI(**kwargs)
         self.stats = CallStats()
 
+    def _api_kwargs(self, temperature: float | None, **kwargs) -> dict:
+        """Build API kwargs, omitting None temperature."""
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        return kwargs
+
     def _call_api(self, messages: list[dict], **kwargs) -> dict:
         """Single API call with rate limit retry."""
+        # Newer OpenAI models use max_completion_tokens instead of max_tokens
+        if "max_tokens" in kwargs and "max_completion_tokens" not in kwargs:
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+
         for attempt in range(5):
             try:
                 response = self.client.chat.completions.create(
@@ -252,8 +262,7 @@ class BaselineChatLM(ChatLMBase):
 
         response = self._call_api(
             messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
+            **self._api_kwargs(self.temperature, max_tokens=self.max_tokens),
         )
 
         text = response.choices[0].message.content or ""
@@ -326,11 +335,11 @@ class InterleavedChatLM(ChatLMBase):
             try:
                 response = self._call_api(
                     call_messages,
-                    temperature=self.retry_temperature
-                    if retries > 0
-                    else self.temperature,
-                    max_tokens=self.max_tokens,
-                    response_format=INTERLEAVED_SCHEMA,
+                    **self._api_kwargs(
+                        self.retry_temperature if retries > 0 else self.temperature,
+                        max_tokens=self.max_tokens,
+                        response_format=INTERLEAVED_SCHEMA,
+                    ),
                 )
 
                 raw = response.choices[0].message.content or "{}"
@@ -346,8 +355,7 @@ class InterleavedChatLM(ChatLMBase):
                 # Fallback to plain call if structured output fails
                 fallback_response = self._call_api(
                     messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
+                    **self._api_kwargs(self.temperature, max_tokens=self.max_tokens),
                 )
                 answer = fallback_response.choices[0].message.content or ""
                 confidence = 0.5
