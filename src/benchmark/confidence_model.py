@@ -270,8 +270,8 @@ class InterleavedChatLM(ChatLMBase):
                         f"Issue: {t['confidence_reason']}\n"
                     )
                 retry_context += (
-                    "\nYour previous confidence was low. "
-                    "Try a different approach, verify your reasoning, "
+                    "\nYour previous confidence was low."
+                    "Try a different approach, verify your reasoning,"
                     "or check for errors. Do NOT repeat the same reasoning."
                 )
                 call_messages.append({"role": "user", "content": retry_context})
