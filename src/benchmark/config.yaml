@@ -14,7 +14,7 @@ model:
 # --- Interleaved reasoning settings ---
 interleaved:
   confidence_threshold: 0.7  # re-think if confidence < this
-  max_retries: 2             # max re-think attempts per chunk
+  max_retries: 5             # max re-think attempts per chunk
   retry_temperature: null    # null = use model default
 
   # Confidence calibration prompt (injected into system prompt)
