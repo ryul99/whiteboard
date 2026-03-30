@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any
 
 from openai import OpenAI
 
@@ -15,40 +14,36 @@ logger = logging.getLogger(__name__)
 WHITEBOARD_TOOLS = [
     {
         "type": "function",
-        "function": {
-            "name": "write",
-            "description": "Write the thoughts at note and name the note as `key`",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key": {
-                        "type": "string",
-                        "description": "Name of the note",
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "Content to write",
-                    },
+        "name": "write",
+        "description": "Write the thoughts at note and name the note as `key`",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Name of the note",
                 },
-                "required": ["key", "text"],
+                "text": {
+                    "type": "string",
+                    "description": "Content to write",
+                },
             },
+            "required": ["key", "text"],
         },
     },
     {
         "type": "function",
-        "function": {
-            "name": "read",
-            "description": "Recall the note named as `key`",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key": {
-                        "type": "string",
-                        "description": "Name of the note to recall",
-                    },
+        "name": "read",
+        "description": "Recall the note named as `key`",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Name of the note to recall",
                 },
-                "required": ["key"],
             },
+            "required": ["key"],
         },
     },
 ]
@@ -98,56 +93,63 @@ class WhiteboardOpenAI(LM):
         self, prompt: str, stop_sequences: list[str], max_tokens: int
     ) -> str:
         whiteboard: dict[str, str] = {}
-        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+
+        response = self.client.responses.create(
+            model=self.model_name,
+            input=prompt,
+            tools=WHITEBOARD_TOOLS,
+            max_output_tokens=max_tokens,
+            temperature=0.0,
+        )
 
         for _ in range(self._max_turns):
-            response = self.client.chat.completions.create(
+            function_calls = [
+                item for item in response.output if item.type == "function_call"
+            ]
+
+            if not function_calls:
+                text = response.output_text or ""
+                for stop in stop_sequences:
+                    if stop in text:
+                        text = text[: text.index(stop)]
+                return text
+
+            tool_outputs = []
+            for fc in function_calls:
+                result = self._execute_tool(fc, whiteboard)
+                logger.debug(
+                    "Tool call: %s(%s) -> %s",
+                    fc.name,
+                    fc.arguments,
+                    result,
+                )
+                tool_outputs.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": fc.call_id,
+                        "output": result,
+                    }
+                )
+
+            response = self.client.responses.create(
                 model=self.model_name,
-                messages=messages,
+                previous_response_id=response.id,
+                input=tool_outputs,
                 tools=WHITEBOARD_TOOLS,
-                max_tokens=max_tokens,
+                max_output_tokens=max_tokens,
                 temperature=0.0,
             )
-
-            choice = response.choices[0]
-            assistant_msg = choice.message
-
-            if assistant_msg.tool_calls:
-                # Model is using whiteboard tools - continue the loop
-                messages.append(assistant_msg)
-                for tool_call in assistant_msg.tool_calls:
-                    result = self._execute_tool(tool_call, whiteboard)
-                    logger.debug(
-                        "Tool call: %s(%s) -> %s",
-                        tool_call.function.name,
-                        tool_call.function.arguments,
-                        result,
-                    )
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": result,
-                        }
-                    )
-            else:
-                # Model answered without tools - final answer
-                content = assistant_msg.content or ""
-                for stop in stop_sequences:
-                    if stop in content:
-                        content = content[: content.index(stop)]
-                return content
 
         logger.warning("Max turns (%d) reached without final answer", self._max_turns)
         return ""
 
     @staticmethod
-    def _execute_tool(tool_call, whiteboard: dict[str, str]) -> str:
-        args = json.loads(tool_call.function.arguments)
-        if tool_call.function.name == "write":
+    def _execute_tool(function_call, whiteboard: dict[str, str]) -> str:
+        args = json.loads(function_call.arguments)
+        if function_call.name == "write":
             whiteboard[args["key"]] = args["text"]
             return f"Saved to '{args['key']}'."
-        if tool_call.function.name == "read":
+        if function_call.name == "read":
             key = args["key"]
             if key not in whiteboard:
                 return f"No data found for '{key}'."
