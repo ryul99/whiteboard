@@ -109,15 +109,15 @@ class ChatLMBase(LM):
         temperature: float | None = None,
         reasoning_effort: str | None = "low",
         max_tokens: int = 1024,
-        system_prompt: str | None = None,
+        developer_prompt: str | None = None,
     ):
         super().__init__()
         self.model_name = model_name
         self.temperature = temperature
         self.reasoning_effort = reasoning_effort
         self.max_tokens = max_tokens
-        self.system_prompt = (
-            system_prompt
+        self.developer_prompt = (
+            developer_prompt
             or "You are a helpful assistant that answers questions accurately and concisely."
         )
 
@@ -138,21 +138,10 @@ class ChatLMBase(LM):
 
     def _call_api(self, messages: list[dict], **kwargs) -> dict:
         """Single API call with rate limit retry."""
-        # Extract system message as instructions
-        instructions = None
-        input_messages = []
-        for msg in messages:
-            if msg["role"] == "system":
-                instructions = msg["content"]
-            else:
-                input_messages.append(msg)
-
         api_kwargs = dict(
             model=self.model_name,
-            input=input_messages,
+            input=messages,
         )
-        if instructions:
-            api_kwargs["instructions"] = instructions
         if self.reasoning_effort is not None:
             api_kwargs["reasoning"] = {"effort": self.reasoning_effort}
         if "max_tokens" in kwargs:
@@ -161,7 +150,6 @@ class ChatLMBase(LM):
             api_kwargs["temperature"] = kwargs.pop("temperature")
         if "response_format" in kwargs:
             fmt = kwargs.pop("response_format")
-            # Convert chat completions format to responses API format
             if fmt.get("type") == "json_schema" and "json_schema" in fmt:
                 js = fmt["json_schema"]
                 api_kwargs["text"] = {
@@ -219,67 +207,14 @@ class ChatLMBase(LM):
         return results
 
     def loglikelihood(self, requests):
-        results = []
-        for request in requests:
-            context, continuation = request.args
-            ll, ig = self._compute_loglikelihood(context, continuation)
-            results.append((ll, ig))
-        return results
+        raise NotImplementedError(
+            "loglikelihood is not supported. Use generate_until tasks instead."
+        )
 
     def loglikelihood_rolling(self, requests):
-        results = []
-        for request in requests:
-            (text,) = request.args
-            ll, ig = self._compute_loglikelihood("", text)
-            results.append((ll, ig))
-        return results
-
-    def _compute_loglikelihood(
-        self, context: str, continuation: str
-    ) -> tuple[float, bool]:
-        if not continuation:
-            return (0.0, False)
-
-        full_text = context + continuation
-        context_char_len = len(context)
-
-        try:
-            response = self.client.completions.create(
-                model=self.model_name,
-                prompt=full_text,
-                max_tokens=1,
-                echo=True,
-                logprobs=1,
-                temperature=0,
-            )
-            self.stats.total_calls += 1
-
-            lp = response.choices[0].logprobs
-
-            # Find where continuation starts via character offsets
-            cont_start = None
-            for i, offset in enumerate(lp.text_offset):
-                if offset is not None and offset >= context_char_len:
-                    cont_start = i
-                    break
-
-            if cont_start is None:
-                return (0.0, False)
-
-            # Sum log-probs for continuation tokens (exclude generated token)
-            n_prompt_tokens = len(lp.tokens) - 1
-            cont_lps = [
-                p
-                for p in lp.token_logprobs[cont_start:n_prompt_tokens]
-                if p is not None
-            ]
-
-            log_likelihood = sum(cont_lps) if cont_lps else 0.0
-            return (log_likelihood, True)
-
-        except Exception as e:
-            logger.warning(f"loglikelihood computation failed: {e}")
-            return (0.0, False)
+        raise NotImplementedError(
+            "loglikelihood_rolling is not supported. Use generate_until tasks instead."
+        )
 
 
 class BaselineChatLM(ChatLMBase):
@@ -287,7 +222,7 @@ class BaselineChatLM(ChatLMBase):
 
     def generate(self, prompt: str, until: list[str] | None = None) -> str:
         messages = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "developer", "content": self.developer_prompt},
             {"role": "user", "content": prompt},
         ]
 
@@ -326,8 +261,8 @@ class InterleavedChatLM(ChatLMBase):
         self.retry_temperature = retry_temperature
 
         # Append confidence guide to system prompt
-        self.system_prompt = (
-            self.system_prompt
+        self.developer_prompt = (
+            self.developer_prompt
             + "\n\n"
             + confidence_guide
             + "\n\nYou must respond in the exact JSON format requested."
@@ -335,7 +270,7 @@ class InterleavedChatLM(ChatLMBase):
 
     def generate(self, prompt: str, until: list[str] | None = None) -> str:
         messages = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "developer", "content": self.developer_prompt},
             {"role": "user", "content": prompt},
         ]
 

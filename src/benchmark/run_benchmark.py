@@ -336,7 +336,7 @@ def main():
         max_tokens=model_cfg.get("max_tokens", 1024),
     )
 
-    answer_system_prompt = (
+    answer_developer_prompt = (
         "You are an expert at answering questions. "
         "Read the question carefully and provide ONLY the answer label "
         "(e.g., A, B, C, or D for multiple choice). "
@@ -345,12 +345,12 @@ def main():
 
     baseline_lm = BaselineChatLM(
         **common_kwargs,
-        system_prompt=answer_system_prompt,
+        developer_prompt=answer_developer_prompt,
     )
 
     interleaved_lm = InterleavedChatLM(
         **common_kwargs,
-        system_prompt=answer_system_prompt,
+        developer_prompt=answer_developer_prompt,
         confidence_threshold=threshold,
         max_retries=max_retries,
         retry_temperature=interleaved_cfg.get("retry_temperature", 0.3),
