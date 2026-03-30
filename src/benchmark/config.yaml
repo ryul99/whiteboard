@@ -9,7 +9,7 @@ model:
   model_name: "gpt-5-mini"
   temperature: null          # null = use model default
   reasoning_effort: low      # reasoning effort (low, medium, high)
-  max_tokens: 1024           # max tokens per call
+  max_tokens: 2048           # max tokens per call
 
 # --- Interleaved reasoning settings ---
 interleaved:
