@@ -331,7 +331,8 @@ def main():
     common_kwargs = dict(
         model_name=model_cfg["model_name"],
         api_base=model_cfg.get("api_base"),
-        temperature=model_cfg.get("temperature", 0.0),
+        temperature=model_cfg.get("temperature"),
+        reasoning_effort=model_cfg.get("reasoning_effort", "low"),
         max_tokens=model_cfg.get("max_tokens", 1024),
     )
 

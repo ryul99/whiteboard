@@ -107,12 +107,14 @@ class ChatLMBase(LM):
         api_base: str | None = None,
         api_key: str | None = None,
         temperature: float | None = None,
+        reasoning_effort: str | None = "low",
         max_tokens: int = 1024,
         system_prompt: str | None = None,
     ):
         super().__init__()
         self.model_name = model_name
         self.temperature = temperature
+        self.reasoning_effort = reasoning_effort
         self.max_tokens = max_tokens
         self.system_prompt = (
             system_prompt
@@ -136,23 +138,52 @@ class ChatLMBase(LM):
 
     def _call_api(self, messages: list[dict], **kwargs) -> dict:
         """Single API call with rate limit retry."""
-        # Newer OpenAI models use max_completion_tokens instead of max_tokens
-        if "max_tokens" in kwargs and "max_completion_tokens" not in kwargs:
-            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        # Extract system message as instructions
+        instructions = None
+        input_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                instructions = msg["content"]
+            else:
+                input_messages.append(msg)
+
+        api_kwargs = dict(
+            model=self.model_name,
+            input=input_messages,
+        )
+        if instructions:
+            api_kwargs["instructions"] = instructions
+        if self.reasoning_effort is not None:
+            api_kwargs["reasoning"] = {"effort": self.reasoning_effort}
+        if "max_tokens" in kwargs:
+            api_kwargs["max_output_tokens"] = kwargs.pop("max_tokens")
+        if "temperature" in kwargs:
+            api_kwargs["temperature"] = kwargs.pop("temperature")
+        if "response_format" in kwargs:
+            fmt = kwargs.pop("response_format")
+            # Convert chat completions format to responses API format
+            if fmt.get("type") == "json_schema" and "json_schema" in fmt:
+                js = fmt["json_schema"]
+                api_kwargs["text"] = {
+                    "format": {
+                        "type": "json_schema",
+                        "name": js["name"],
+                        "strict": js.get("strict", True),
+                        "schema": js["schema"],
+                    }
+                }
+            else:
+                api_kwargs["text"] = {"format": fmt}
+        api_kwargs.update(kwargs)
 
         for attempt in range(5):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=messages,
-                    **kwargs,
-                )
+                response = self.client.responses.create(**api_kwargs)
                 self.stats.total_calls += 1
 
-                # Track token usage
                 if response.usage:
-                    self.stats.total_input_tokens += response.usage.prompt_tokens
-                    self.stats.total_output_tokens += response.usage.completion_tokens
+                    self.stats.total_input_tokens += response.usage.input_tokens
+                    self.stats.total_output_tokens += response.usage.output_tokens
 
                 return response
             except Exception as e:
@@ -265,7 +296,7 @@ class BaselineChatLM(ChatLMBase):
             **self._api_kwargs(self.temperature, max_tokens=self.max_tokens),
         )
 
-        text = response.choices[0].message.content or ""
+        text = response.output_text or ""
         self.stats.confidence_values.append(1.0)  # Baseline has no confidence tracking
         self.stats.retry_counts.append(0)
 
@@ -342,7 +373,7 @@ class InterleavedChatLM(ChatLMBase):
                     ),
                 )
 
-                raw = response.choices[0].message.content or "{}"
+                raw = response.output_text or "{}"
                 parsed = json.loads(raw)
 
                 thought = parsed.get("thought", "")
@@ -357,7 +388,7 @@ class InterleavedChatLM(ChatLMBase):
                     messages,
                     **self._api_kwargs(self.temperature, max_tokens=self.max_tokens),
                 )
-                answer = fallback_response.choices[0].message.content or ""
+                answer = fallback_response.output_text or ""
                 confidence = 0.5
                 thought = ""
                 reason = "fallback"
