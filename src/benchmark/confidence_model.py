@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field
 
 from openai import OpenAI
+from lm_eval.api.model import LM
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ class CallStats:
         }
 
 
-class ChatLMBase:
+class ChatLMBase(LM):
     """Base LM class using OpenAI-compatible API."""
 
     def __init__(
@@ -109,6 +110,7 @@ class ChatLMBase:
         max_tokens: int = 1024,
         system_prompt: str | None = None,
     ):
+        super().__init__()
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -151,6 +153,92 @@ class ChatLMBase:
                 else:
                     raise
         raise RuntimeError("Max API retries exceeded")
+
+    # ── lm_eval.api.model.LM interface ──
+
+    @property
+    def batch_size(self):
+        return 1
+
+    @property
+    def max_length(self):
+        return 128000
+
+    @property
+    def max_gen_toks(self):
+        return self.max_tokens
+
+    def generate_until(self, requests):
+        results = []
+        for request in requests:
+            context, gen_kwargs = request.args
+            until = gen_kwargs.get("until", ["\n"])
+            answer = self.generate(context, until=until)
+            results.append(answer)
+        return results
+
+    def loglikelihood(self, requests):
+        results = []
+        for request in requests:
+            context, continuation = request.args
+            ll, ig = self._compute_loglikelihood(context, continuation)
+            results.append((ll, ig))
+        return results
+
+    def loglikelihood_rolling(self, requests):
+        results = []
+        for request in requests:
+            (text,) = request.args
+            ll, ig = self._compute_loglikelihood("", text)
+            results.append((ll, ig))
+        return results
+
+    def _compute_loglikelihood(
+        self, context: str, continuation: str
+    ) -> tuple[float, bool]:
+        if not continuation:
+            return (0.0, False)
+
+        full_text = context + continuation
+        context_char_len = len(context)
+
+        try:
+            response = self.client.completions.create(
+                model=self.model_name,
+                prompt=full_text,
+                max_tokens=1,
+                echo=True,
+                logprobs=1,
+                temperature=0,
+            )
+            self.stats.total_calls += 1
+
+            lp = response.choices[0].logprobs
+
+            # Find where continuation starts via character offsets
+            cont_start = None
+            for i, offset in enumerate(lp.text_offset):
+                if offset is not None and offset >= context_char_len:
+                    cont_start = i
+                    break
+
+            if cont_start is None:
+                return (0.0, False)
+
+            # Sum log-probs for continuation tokens (exclude generated token)
+            n_prompt_tokens = len(lp.tokens) - 1
+            cont_lps = [
+                p
+                for p in lp.token_logprobs[cont_start:n_prompt_tokens]
+                if p is not None
+            ]
+
+            log_likelihood = sum(cont_lps) if cont_lps else 0.0
+            return (log_likelihood, True)
+
+        except Exception as e:
+            logger.warning(f"loglikelihood computation failed: {e}")
+            return (0.0, False)
 
 
 class BaselineChatLM(ChatLMBase):

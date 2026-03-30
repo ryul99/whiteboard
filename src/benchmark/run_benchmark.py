@@ -3,7 +3,7 @@
 Confidence-Gated Interleaved Reasoning — Benchmark Runner
 
 Compares baseline (single-call) vs interleaved (confidence-gated) performance
-using lm-evaluation-harness task data and metrics.
+using lm-evaluation-harness.
 
 Usage:
     python run_benchmark.py --config config.yaml
@@ -16,7 +16,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -24,9 +23,10 @@ from pathlib import Path
 
 import yaml
 
+import lm_eval
 from lm_eval.tasks import TaskManager, get_task_dict
 
-from confidence_model import BaselineChatLM, InterleavedChatLM
+from confidence_model import BaselineChatLM, InterleavedChatLM, CallStats
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,259 +37,51 @@ logger = logging.getLogger("benchmark")
 
 
 # ──────────────────────────────────────────────
-# Task data extraction helpers
+# Evaluation helpers
 # ──────────────────────────────────────────────
 
 
-def load_task_docs(
-    task_name: str, limit: int | None = None, num_fewshot: int = 0
-) -> list[dict]:
-    """
-    Extract evaluation documents (docs) and prompts from an lm_eval task.
-    Returns: [{"doc": original_doc, "prompt": str, "target": str, "until": list[str]}, ...]
-    """
+def run_eval(
+    lm,
+    tasks: list[str],
+    num_fewshot: int = 0,
+    limit: int | None = None,
+    log_samples: bool = True,
+) -> dict:
+    """Run evaluation using lm_eval.evaluate()."""
     task_manager = TaskManager()
-    task_dict = get_task_dict([task_name], task_manager)
+    task_dict = get_task_dict(tasks, task_manager)
 
-    task_obj = task_dict[task_name]
-
-    # Access config if ConfigurableTask
-    if hasattr(task_obj, "config"):
-        cfg = task_obj.config
-    else:
-        cfg = None
-
-    # Configure fewshot
-    if hasattr(task_obj, "set_fewshot_seed"):
-        task_obj.set_fewshot_seed(seed=1234)
-
-    # Build dataset
-    if hasattr(task_obj, "build_all_requests"):
-        pass  # Required in some versions
-
-    # Get test set
-    if hasattr(task_obj, "test_docs"):
-        docs = list(task_obj.test_docs())
-    elif hasattr(task_obj, "eval_docs"):
-        docs = list(task_obj.eval_docs())
-    elif hasattr(task_obj, "validation_docs"):
-        docs = list(task_obj.validation_docs())
-    else:
-        raise ValueError(f"No evaluation documents found for task {task_name}.")
-
-    if limit:
-        docs = docs[:limit]
-
-    results = []
-    for doc in docs:
-        # Generate prompt
-        prompt = task_obj.doc_to_text(doc)
-        if isinstance(prompt, list):
-            # Chat format
-            prompt = "\n".join(
-                f"{m.get('role', 'user')}: {m.get('content', '')}" for m in prompt
-            )
-
-        # Extract target answer
-        target = task_obj.doc_to_target(doc)
-        if isinstance(target, list):
-            target = target[0] if target else ""
-        target = str(target).strip()
-
-        # Build fewshot prompt
-        if num_fewshot > 0 and hasattr(task_obj, "fewshot_context"):
-            try:
-                ctx = task_obj.fewshot_context(doc, num_fewshot)
-                if ctx:
-                    prompt = ctx
-            except Exception:
-                pass  # Fall back to zero-shot if fewshot fails
-
-        # Extract stop tokens from generation_kwargs
-        until = []
-        if cfg and hasattr(cfg, "generation_kwargs") and cfg.generation_kwargs:
-            until = cfg.generation_kwargs.get("until", [])
-        if not until:
-            until = ["\n", "</s>", "<|im_end|>"]
-
-        results.append(
-            {
-                "doc": doc,
-                "prompt": str(prompt),
-                "target": target,
-                "until": until,
-            }
-        )
+    results = lm_eval.evaluate(
+        lm=lm,
+        task_dict=task_dict,
+        num_fewshot=num_fewshot,
+        limit=limit,
+        log_samples=log_samples,
+    )
 
     return results
 
 
-def extract_answer_label(text: str) -> str:
-    """Extract answer label (A, B, C, D, etc.) from response."""
-    text = text.strip()
-
-    # Exact label matching: (A), (B), ... or A, B, ...
-    patterns = [
-        r"\(([A-D])\)",  # (A), (B), (C), (D)
-        r"^([A-D])[\s\.\)]",  # A. or A) at start
-        r"^([A-D])$",  # just A
-        r"answer is\s*\(?([A-D])\)?",  # "answer is (A)" or "answer is A"
-        r"([A-D])(?:\s|$)",  # any standalone A-D
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            return m.group(1).upper()
-
-    return text[:50]  # Fallback: first 50 characters
-
-
-def check_match(prediction: str, target: str) -> bool:
-    """Check if prediction matches target (flexible matching)."""
-    pred = prediction.strip().upper()
-    tgt = target.strip().upper()
-
-    # Exact match
-    if pred == tgt:
-        return True
-
-    # Compare after label extraction
-    pred_label = extract_answer_label(pred)
-    tgt_label = extract_answer_label(tgt)
-
-    if pred_label and tgt_label and pred_label == tgt_label:
-        return True
-
-    # Compare after removing parentheses
-    pred_clean = pred.replace("(", "").replace(")", "").strip()
-    tgt_clean = tgt.replace("(", "").replace(")", "").strip()
-    if pred_clean == tgt_clean:
-        return True
-
-    return False
-
-
 # ──────────────────────────────────────────────
-# Benchmark runner
+# Results display
 # ──────────────────────────────────────────────
 
 
-def run_single_task(
-    task_name: str,
-    baseline_lm: BaselineChatLM,
-    interleaved_lm: InterleavedChatLM,
-    limit: int | None = None,
-    num_fewshot: int = 0,
-    log_samples: bool = True,
-) -> dict:
-    """Run baseline vs interleaved comparison for a single task."""
-    logger.info(f"{'=' * 60}")
-    logger.info(f"Task: {task_name}")
-    logger.info(f"{'=' * 60}")
-
-    # Load task data
-    logger.info("Loading task data...")
-    try:
-        task_docs = load_task_docs(task_name, limit=limit, num_fewshot=num_fewshot)
-    except Exception as e:
-        logger.error(f"Failed to load task {task_name}: {e}")
-        return {"task": task_name, "error": str(e)}
-
-    n_samples = len(task_docs)
-    logger.info(f"Loaded {n_samples} samples")
-
-    # Store results
-    baseline_correct = 0
-    interleaved_correct = 0
-    sample_logs = []
-
-    for i, item in enumerate(task_docs):
-        prompt = item["prompt"]
-        target = item["target"]
-        until = item["until"]
-
-        if (i + 1) % 10 == 0 or i == 0:
-            logger.info(f"  [{i + 1}/{n_samples}] processing...")
-
-        # ---- Baseline ----
-        try:
-            baseline_answer = baseline_lm.generate(prompt, until=until)
-        except Exception as e:
-            logger.warning(f"  Baseline error on sample {i}: {e}")
-            baseline_answer = ""
-
-        baseline_match = check_match(baseline_answer, target)
-        if baseline_match:
-            baseline_correct += 1
-
-        # ---- Interleaved ----
-        try:
-            interleaved_answer = interleaved_lm.generate(prompt, until=until)
-        except Exception as e:
-            logger.warning(f"  Interleaved error on sample {i}: {e}")
-            interleaved_answer = ""
-
-        interleaved_match = check_match(interleaved_answer, target)
-        if interleaved_match:
-            interleaved_correct += 1
-
-        # Per-sample logging
-        if log_samples:
-            sample_logs.append(
-                {
-                    "index": i,
-                    "target": target,
-                    "baseline_answer": baseline_answer,
-                    "baseline_correct": baseline_match,
-                    "interleaved_answer": interleaved_answer,
-                    "interleaved_correct": interleaved_match,
-                    "interleaved_confidence": (
-                        interleaved_lm.stats.confidence_values[-1]
-                        if interleaved_lm.stats.confidence_values
-                        else None
-                    ),
-                    "interleaved_retries": (
-                        interleaved_lm.stats.retry_counts[-1]
-                        if interleaved_lm.stats.retry_counts
-                        else None
-                    ),
-                }
-            )
-
-    # Compute metrics
-    baseline_acc = baseline_correct / n_samples if n_samples else 0
-    interleaved_acc = interleaved_correct / n_samples if n_samples else 0
-    delta = interleaved_acc - baseline_acc
-
-    result = {
-        "task": task_name,
-        "n_samples": n_samples,
-        "metrics": {
-            "baseline": {
-                "exact_match": round(baseline_acc, 4),
-                "correct": baseline_correct,
-                **baseline_lm.stats.summary(),
-            },
-            "interleaved": {
-                "exact_match": round(interleaved_acc, 4),
-                "correct": interleaved_correct,
-                **interleaved_lm.stats.summary(),
-            },
-            "delta": {
-                "exact_match": round(delta, 4),
-                "exact_match_pct": f"{delta * 100:+.1f}%",
-            },
-        },
-    }
-
-    if log_samples:
-        result["samples"] = sample_logs
-
-    return result
+def _pick_primary_metric(metrics: dict) -> str | None:
+    for key in ("acc_norm", "acc", "exact_match"):
+        if key in metrics:
+            return key
+    return next(iter(metrics)) if metrics else None
 
 
-def print_results_table(results: list[dict]):
-    """Print results as a formatted table."""
+def print_results_table(
+    baseline_eval: dict,
+    interleaved_eval: dict,
+    baseline_lm,
+    interleaved_lm,
+    tasks: list[str],
+):
     try:
         from tabulate import tabulate
     except ImportError:
@@ -299,95 +91,142 @@ def print_results_table(results: list[dict]):
     print("  BENCHMARK RESULTS: Baseline vs Confidence-Gated Interleaved Reasoning")
     print("=" * 80)
 
+    # ── Summary table ──
     rows = []
-    for r in results:
-        if "error" in r:
-            rows.append([r["task"], "ERROR", "", "", "", ""])
+    for task_name in tasks:
+        b_metrics = baseline_eval["results"].get(task_name, {})
+        i_metrics = interleaved_eval["results"].get(task_name, {})
+
+        metric_key = _pick_primary_metric(b_metrics)
+        if metric_key is None:
+            rows.append([task_name, "NO METRICS", "", "", "", ""])
             continue
 
-        m = r["metrics"]
+        b_val = b_metrics.get(metric_key, 0)
+        i_val = i_metrics.get(metric_key, 0)
+        delta = i_val - b_val
+
+        n_samples = baseline_eval.get("n-samples", {}).get(task_name, "?")
+
         rows.append(
             [
-                r["task"],
-                r["n_samples"],
-                f"{m['baseline']['exact_match']:.1%}",
-                f"{m['interleaved']['exact_match']:.1%}",
-                m["delta"]["exact_match_pct"],
-                f"{m['interleaved']['avg_calls_per_sample']:.1f}",
+                task_name,
+                n_samples,
+                f"{b_val:.1%}",
+                f"{i_val:.1%}",
+                f"{delta * 100:+.1f}%",
+                metric_key,
             ]
         )
 
-    headers = ["Task", "N", "Baseline", "Interleaved", "Delta", "Avg API calls"]
+    headers = ["Task", "N", "Baseline", "Interleaved", "Delta", "Metric"]
 
     if tabulate:
         print(tabulate(rows, headers=headers, tablefmt="rounded_grid"))
     else:
-        # Fallback: simple table
         header_str = " | ".join(f"{h:<20}" for h in headers)
         print(header_str)
         print("-" * len(header_str))
         for row in rows:
             print(" | ".join(f"{str(v):<20}" for v in row))
 
-    # Statistics summary
-    for r in results:
-        if "error" in r:
-            continue
-        m = r["metrics"]
-        print(f"\n--- {r['task']} Detailed Statistics ---")
+    # ── Statistics summary ──
+    for task_name in tasks:
+        print(f"\n--- {task_name} Detailed Statistics ---")
         print(
-            f"  Interleaved avg confidence:  {m['interleaved']['avg_confidence']:.3f}"
+            f"  Interleaved avg confidence:  {interleaved_lm.stats.avg_confidence:.3f}"
         )
-        print(f"  Interleaved retry rate:      {m['interleaved']['retry_rate']:.1%}")
-        print(f"  Interleaved total API calls: {m['interleaved']['total_api_calls']}")
-        print(f"  Baseline total API calls:    {m['baseline']['total_api_calls']}")
+        print(f"  Interleaved retry rate:      {interleaved_lm.stats.retry_rate:.1%}")
+        print(f"  Interleaved total API calls: {interleaved_lm.stats.total_api_calls}")
+        print(f"  Baseline total API calls:    {baseline_lm.stats.total_calls}")
         print(
             f"  Token overhead:              "
-            f"{m['interleaved']['total_input_tokens'] + m['interleaved']['total_output_tokens']} "
-            f"vs {m['baseline']['total_input_tokens'] + m['baseline']['total_output_tokens']}"
+            f"{interleaved_lm.stats.total_input_tokens + interleaved_lm.stats.total_output_tokens} "
+            f"vs {baseline_lm.stats.total_input_tokens + baseline_lm.stats.total_output_tokens}"
         )
 
-    # Correct/incorrect case analysis
-    for r in results:
-        if "error" in r or "samples" not in r:
+    # ── Per-sample improvement / regression analysis ──
+    for task_name in tasks:
+        b_samples = baseline_eval.get("samples", {}).get(task_name, [])
+        i_samples = interleaved_eval.get("samples", {}).get(task_name, [])
+
+        if not b_samples or not i_samples:
             continue
-        samples = r["samples"]
 
-        # Cases where Interleaved was correct but Baseline was wrong
-        fixed = [
-            s for s in samples if s["interleaved_correct"] and not s["baseline_correct"]
-        ]
-        # Cases where Baseline was correct but Interleaved was wrong
-        broken = [
-            s for s in samples if not s["interleaved_correct"] and s["baseline_correct"]
-        ]
+        # Match by doc_id
+        b_by_id = {s["doc_id"]: s for s in b_samples}
+        i_by_id = {s["doc_id"]: s for s in i_samples}
 
-        print(f"\n--- {r['task']} Improvement / Regression Analysis ---")
+        metric_key = _pick_primary_metric(baseline_eval["results"].get(task_name, {}))
+        if metric_key is None:
+            continue
+
+        # For multiple-choice tasks: check which choice was selected
+        # For generate_until tasks: check filtered_resps against target
+        fixed = []
+        broken = []
+
+        for doc_id in b_by_id:
+            if doc_id not in i_by_id:
+                continue
+            bs = b_by_id[doc_id]
+            is_ = i_by_id[doc_id]
+
+            b_correct = _is_correct(bs, metric_key)
+            i_correct = _is_correct(is_, metric_key)
+
+            if i_correct and not b_correct:
+                fixed.append((doc_id, bs, is_))
+            elif not i_correct and b_correct:
+                broken.append((doc_id, bs, is_))
+
+        print(f"\n--- {task_name} Improvement / Regression Analysis ---")
         print(f"  Additional samples Interleaved got correct: {len(fixed)}")
         print(f"  Additional samples Interleaved got wrong:   {len(broken)}")
         print(f"  Net improvement: {len(fixed) - len(broken)}")
 
         if fixed:
             print("\n  [Improved samples (up to 3)]")
-            for s in fixed[:3]:
+            for doc_id, bs, is_ in fixed[:3]:
+                b_resp = _format_resp(bs)
+                i_resp = _format_resp(is_)
                 print(
-                    f"    #{s['index']}: target={s['target']}, "
-                    f"baseline='{s['baseline_answer'][:30]}', "
-                    f"interleaved='{s['interleaved_answer'][:30]}' "
-                    f"(conf={s['interleaved_confidence']:.2f}, retries={s['interleaved_retries']})"
+                    f"    #{doc_id}: target={bs.get('target', '?')}, "
+                    f"baseline='{b_resp[:30]}', "
+                    f"interleaved='{i_resp[:30]}'"
                 )
 
         if broken:
             print("\n  [Regressed samples (up to 3)]")
-            for s in broken[:3]:
+            for doc_id, bs, is_ in broken[:3]:
+                b_resp = _format_resp(bs)
+                i_resp = _format_resp(is_)
                 print(
-                    f"    #{s['index']}: target={s['target']}, "
-                    f"baseline='{s['baseline_answer'][:30]}', "
-                    f"interleaved='{s['interleaved_answer'][:30]}' "
-                    f"(conf={s['interleaved_confidence']:.2f}, retries={s['interleaved_retries']})"
+                    f"    #{doc_id}: target={bs.get('target', '?')}, "
+                    f"baseline='{b_resp[:30]}', "
+                    f"interleaved='{i_resp[:30]}'"
                 )
 
     print()
+
+
+def _is_correct(sample: dict, metric_key: str) -> bool:
+    """Check if a sample was answered correctly."""
+    # For multiple-choice / loglikelihood tasks, filtered_resps contains results
+    filtered = sample.get("filtered_resps", [])
+    if isinstance(filtered, list) and filtered:
+        # For mc tasks, filtered_resps[0] is the selected choice index
+        return bool(filtered[0])
+    # Fallback: check metrics
+    metrics = sample.get("metrics", {})
+    return metrics.get(metric_key, 0) == 1.0
+
+
+def _format_resp(sample: dict) -> str:
+    resps = sample.get("resps", [])
+    if resps and isinstance(resps[0], list):
+        return str(resps[0][0]) if resps[0] else ""
+    return str(resps[0]) if resps else ""
 
 
 # ──────────────────────────────────────────────
@@ -485,8 +324,6 @@ def main():
         max_tokens=model_cfg.get("max_tokens", 1024),
     )
 
-    # ── Use structured output + system prompt for Baseline as well
-    # (Use the same system prompt for a fair comparison)
     answer_system_prompt = (
         "You are an expert at answering questions. "
         "Read the question carefully and provide ONLY the answer label "
@@ -508,29 +345,35 @@ def main():
         confidence_guide=interleaved_cfg.get("confidence_guide", ""),
     )
 
-    # Run per task
-    all_results = []
+    # ── Run evaluations ──
     start_time = time.time()
 
-    for task_name in tasks:
-        # Reset stats for each task
-        baseline_lm.stats = __import__("confidence_model").CallStats()
-        interleaved_lm.stats = __import__("confidence_model").CallStats()
+    logger.info("Running baseline evaluation...")
+    baseline_eval = run_eval(
+        lm=baseline_lm,
+        tasks=tasks,
+        num_fewshot=eval_cfg.get("num_fewshot", 0),
+        limit=limit,
+        log_samples=eval_cfg.get("log_samples", True),
+    )
 
-        result = run_single_task(
-            task_name=task_name,
-            baseline_lm=baseline_lm,
-            interleaved_lm=interleaved_lm,
-            limit=limit,
-            num_fewshot=eval_cfg.get("num_fewshot", 0),
-            log_samples=eval_cfg.get("log_samples", True),
-        )
-        all_results.append(result)
+    interleaved_lm.stats = CallStats()
+
+    logger.info("Running interleaved evaluation...")
+    interleaved_eval = run_eval(
+        lm=interleaved_lm,
+        tasks=tasks,
+        num_fewshot=eval_cfg.get("num_fewshot", 0),
+        limit=limit,
+        log_samples=eval_cfg.get("log_samples", True),
+    )
 
     elapsed = time.time() - start_time
 
     # Print results
-    print_results_table(all_results)
+    print_results_table(
+        baseline_eval, interleaved_eval, baseline_lm, interleaved_lm, tasks
+    )
     logger.info(f"Total time: {elapsed:.1f}s")
 
     # Save as JSON
@@ -548,17 +391,14 @@ def main():
             "max_retries": max_retries,
             "elapsed_seconds": round(elapsed, 1),
         },
-        "results": all_results,
+        "baseline_results": baseline_eval["results"],
+        "interleaved_results": interleaved_eval["results"],
+        "baseline_stats": baseline_lm.stats.summary(),
+        "interleaved_stats": interleaved_lm.stats.summary(),
     }
 
-    # Remove doc from samples (to avoid serialization issues)
-    for r in output_data["results"]:
-        if "samples" in r:
-            for s in r["samples"]:
-                s.pop("doc", None)
-
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, ensure_ascii=False, indent=2)
+        json.dump(output_data, f, ensure_ascii=False, indent=2, default=str)
 
     logger.info(f"Results saved to: {output_path}")
 
