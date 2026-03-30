@@ -23,10 +23,8 @@ logger = logging.getLogger(__name__)
 # Structured output schema
 # ------------------------------------------------------------------
 class InterleavedResponse(BaseModel):
-    thought: str = Field(description="Internal reasoning (hidden from user)")
-    answer: str = Field(
-        description="The answer to present (exact answer label like A, B, C, D or the answer text)"
-    )
+    thought: str = Field(description="Your reasoning thoughts")
+    answer: str = Field(description="The answer to the user's question")
     confidence: float = Field(description="Self-assessed confidence 0.0-1.0")
     confidence_reason: str = Field(
         description="Why this confidence level (e.g. 'direct calculation' vs 'guessing')"
