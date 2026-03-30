@@ -337,9 +337,9 @@ def main():
     )
 
     answer_developer_prompt = (
-        "You are an expert at answering questions. "
-        "Read the question carefully and provide ONLY the answer label "
-        "(e.g., A, B, C, or D for multiple choice). "
+        "You are an expert at answering questions."
+        "Read the question carefully and provide ONLY the answer label"
+        "(e.g., (A), (B), (C), or (D))."
         "Think step by step, then give your final answer."
     )
 
