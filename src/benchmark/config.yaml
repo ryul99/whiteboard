@@ -1,0 +1,44 @@
+# ============================================================
+# Confidence-Gated Interleaved Reasoning - Benchmark Config
+# ============================================================
+
+# --- Model settings ---
+model:
+  # OpenAI-compatible API endpoint
+  api_base: null  # null = default OpenAI, or "http://localhost:8000/v1"
+  model_name: "gpt-4o-mini"
+  temperature: 0.0           # baseline temperature
+  max_tokens: 1024           # max tokens per call
+
+# --- Interleaved reasoning settings ---
+interleaved:
+  confidence_threshold: 0.7  # re-think if confidence < this
+  max_retries: 2             # max re-think attempts per chunk
+  retry_temperature: 0.3     # slightly higher temp for diversity on retry
+
+  # Confidence calibration prompt (injected into system prompt)
+  confidence_guide: |
+    confidence 기준:
+    - 0.9+: 확실한 사실이거나 직접 계산/검증 가능한 것
+    - 0.7~0.9: 높은 확신이지만 다른 해석 여지가 있음
+    - 0.5~0.7: 불확실하며 여러 답이 가능
+    - 0.5 미만: 추측에 가까움
+    모르면 낮게 쓰라. 높은 confidence로 틀리는 것보다 낮은 confidence로 재시도하는 게 낫다.
+
+# --- Evaluation tasks ---
+# lm-evaluation-harness task names
+tasks:
+  - gpqa_diamond_zeroshot
+  # - gpqa_main_zeroshot
+  # - mmlu
+  # - arc_challenge
+  # - hellaswag
+  # - winogrande
+  # - truthfulqa_mc2
+
+# --- Evaluation settings ---
+eval:
+  num_fewshot: 0            # few-shot examples (0 = zero-shot)
+  limit: null               # null = all samples, or int for quick test
+  log_samples: true         # log per-sample results for analysis
+  output_dir: "./results"   # output directory
