@@ -52,10 +52,14 @@ def run_eval(
     task_manager = TaskManager()
     task_dict = get_task_dict(tasks, task_manager)
 
+    # Override num_fewshot on each task config if non-default
+    if num_fewshot != 0:
+        for task in task_dict.values():
+            task.config.num_fewshot = num_fewshot
+
     results = lm_eval.evaluate(
         lm=lm,
         task_dict=task_dict,
-        num_fewshot=num_fewshot,
         limit=limit,
         log_samples=log_samples,
     )
@@ -69,9 +73,11 @@ def run_eval(
 
 
 def _pick_primary_metric(metrics: dict) -> str | None:
-    for key in ("acc_norm", "acc", "exact_match"):
-        if key in metrics:
-            return key
+    # lm_eval uses "metric,filter" keys (e.g. "acc_norm,none")
+    for prefix in ("acc_norm", "acc", "exact_match"):
+        for key in metrics:
+            if key.split(",")[0] == prefix:
+                return key
     return next(iter(metrics)) if metrics else None
 
 
@@ -102,11 +108,16 @@ def print_results_table(
             rows.append([task_name, "NO METRICS", "", "", "", ""])
             continue
 
-        b_val = b_metrics.get(metric_key, 0)
-        i_val = i_metrics.get(metric_key, 0)
+        b_val = float(b_metrics.get(metric_key, 0))
+        i_val = float(i_metrics.get(metric_key, 0))
         delta = i_val - b_val
 
-        n_samples = baseline_eval.get("n-samples", {}).get(task_name, "?")
+        n_samples_raw = baseline_eval.get("n-samples", {}).get(task_name, "?")
+        n_samples = (
+            n_samples_raw.get("effective", n_samples_raw)
+            if isinstance(n_samples_raw, dict)
+            else n_samples_raw
+        )
 
         rows.append(
             [
@@ -137,7 +148,7 @@ def print_results_table(
             f"  Interleaved avg confidence:  {interleaved_lm.stats.avg_confidence:.3f}"
         )
         print(f"  Interleaved retry rate:      {interleaved_lm.stats.retry_rate:.1%}")
-        print(f"  Interleaved total API calls: {interleaved_lm.stats.total_api_calls}")
+        print(f"  Interleaved total API calls: {interleaved_lm.stats.total_calls}")
         print(f"  Baseline total API calls:    {baseline_lm.stats.total_calls}")
         print(
             f"  Token overhead:              "

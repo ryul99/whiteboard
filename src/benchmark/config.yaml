@@ -6,7 +6,7 @@
 model:
   # OpenAI-compatible API endpoint
   api_base: null  # null = default OpenAI, or "http://localhost:8000/v1"
-  model_name: "gpt-4o-mini"
+  model_name: "gpt-5-mini"
   temperature: 0.0           # baseline temperature
   max_tokens: 1024           # max tokens per call
 
