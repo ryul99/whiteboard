@@ -1,9 +1,9 @@
 """
 Confidence-Gated Interleaved Reasoning - Custom LM for lm-evaluation-harness
 
-두 가지 모드를 제공하는 커스텀 LM 클래스:
-  1. BaselineChatLM       — 표준 단일 호출
-  2. InterleavedChatLM    — confidence-gated 반복 추론
+Custom LM class with two modes:
+  1. BaselineChatLM       — standard single call
+  2. InterleavedChatLM    — confidence-gated iterative reasoning
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ INTERLEAVED_SCHEMA = {
 
 @dataclass
 class CallStats:
-    """API 호출 통계 추적"""
+    """Track API call statistics."""
 
     total_calls: int = 0
     total_retries: int = 0
@@ -98,7 +98,7 @@ class CallStats:
 
 
 class ChatLMBase:
-    """OpenAI-compatible API를 사용하는 기본 LM 클래스"""
+    """Base LM class using OpenAI-compatible API."""
 
     def __init__(
         self,
@@ -127,7 +127,7 @@ class ChatLMBase:
         self.stats = CallStats()
 
     def _call_api(self, messages: list[dict], **kwargs) -> dict:
-        """단일 API 호출 (rate limit 재시도 포함)"""
+        """Single API call with rate limit retry."""
         for attempt in range(5):
             try:
                 response = self.client.chat.completions.create(
@@ -137,7 +137,7 @@ class ChatLMBase:
                 )
                 self.stats.total_calls += 1
 
-                # 토큰 사용량 추적
+                # Track token usage
                 if response.usage:
                     self.stats.total_input_tokens += response.usage.prompt_tokens
                     self.stats.total_output_tokens += response.usage.completion_tokens
@@ -154,7 +154,7 @@ class ChatLMBase:
 
 
 class BaselineChatLM(ChatLMBase):
-    """표준 단일 호출 baseline"""
+    """Standard single-call baseline."""
 
     def generate(self, prompt: str, until: list[str] | None = None) -> str:
         messages = [
@@ -169,10 +169,10 @@ class BaselineChatLM(ChatLMBase):
         )
 
         text = response.choices[0].message.content or ""
-        self.stats.confidence_values.append(1.0)  # baseline은 confidence 추적 없음
+        self.stats.confidence_values.append(1.0)  # Baseline has no confidence tracking
         self.stats.retry_counts.append(0)
 
-        # until 토큰으로 자르기
+        # Truncate at stop tokens
         if until:
             for stop in until:
                 if stop in text:
@@ -197,7 +197,7 @@ class InterleavedChatLM(ChatLMBase):
         self.max_retries = max_retries
         self.retry_temperature = retry_temperature
 
-        # System prompt에 confidence 가이드 추가
+        # Append confidence guide to system prompt
         self.system_prompt = (
             self.system_prompt
             + "\n\n"
@@ -217,7 +217,7 @@ class InterleavedChatLM(ChatLMBase):
         best_confidence = 0.0
 
         while True:
-            # 재시도 시 이전 사고를 context에 추가
+            # On retry, include previous thoughts in context
             call_messages = list(messages)
             if previous_thoughts:
                 retry_context = "Previous reasoning attempts (improve upon these):\n"
@@ -255,7 +255,7 @@ class InterleavedChatLM(ChatLMBase):
 
             except (json.JSONDecodeError, KeyError, TypeError) as e:
                 logger.warning(f"Failed to parse structured output: {e}")
-                # Structured output 실패 시 일반 호출로 fallback
+                # Fallback to plain call if structured output fails
                 fallback_response = self._call_api(
                     messages,
                     temperature=self.temperature,
@@ -266,16 +266,16 @@ class InterleavedChatLM(ChatLMBase):
                 thought = ""
                 reason = "fallback"
 
-            # 최고 confidence 답변 추적
+            # Track best-confidence answer
             if confidence > best_confidence:
                 best_confidence = confidence
                 best_answer = answer
 
-            # Confidence 충분 → 종료
+            # Confidence sufficient -> exit
             if confidence >= self.confidence_threshold:
                 break
 
-            # 재시도 한도 초과 → best effort 반환
+            # Max retries exceeded -> return best effort
             if retries >= self.max_retries:
                 logger.info(
                     f"Max retries ({self.max_retries}) reached. "
@@ -284,7 +284,7 @@ class InterleavedChatLM(ChatLMBase):
                 answer = best_answer
                 break
 
-            # 재시도
+            # Retry
             previous_thoughts.append(
                 {
                     "thought": thought,
@@ -296,11 +296,11 @@ class InterleavedChatLM(ChatLMBase):
             retries += 1
             self.stats.total_retries += 1
 
-        # 통계 기록
+        # Record statistics
         self.stats.confidence_values.append(best_confidence)
         self.stats.retry_counts.append(retries)
 
-        # until 토큰으로 자르기
+        # Truncate at stop tokens
         if until:
             for stop in until:
                 if stop in answer:

@@ -2,8 +2,8 @@
 """
 Confidence-Gated Interleaved Reasoning — Benchmark Runner
 
-lm-evaluation-harness의 태스크 데이터와 메트릭을 활용하여
-baseline(단일 호출) vs interleaved(confidence-gated) 성능을 비교합니다.
+Compares baseline (single-call) vs interleaved (confidence-gated) performance
+using lm-evaluation-harness task data and metrics.
 
 Usage:
     python run_benchmark.py --config config.yaml
@@ -45,7 +45,7 @@ def load_task_docs(
     task_name: str, limit: int | None = None, num_fewshot: int = 0
 ) -> list[dict]:
     """
-    lm_eval 태스크에서 평가 문서(doc)와 프롬프트를 추출합니다.
+    Extract evaluation documents (docs) and prompts from an lm_eval task.
     Returns: [{"doc": original_doc, "prompt": str, "target": str, "until": list[str]}, ...]
     """
     task_manager = TaskManager()
@@ -53,21 +53,21 @@ def load_task_docs(
 
     task_obj = task_dict[task_name]
 
-    # ConfigurableTask인 경우 config 접근
+    # Access config if ConfigurableTask
     if hasattr(task_obj, "config"):
         cfg = task_obj.config
     else:
         cfg = None
 
-    # fewshot 설정
+    # Configure fewshot
     if hasattr(task_obj, "set_fewshot_seed"):
         task_obj.set_fewshot_seed(seed=1234)
 
-    # 데이터셋 빌드
+    # Build dataset
     if hasattr(task_obj, "build_all_requests"):
-        pass  # 일부 버전에서는 이게 필요
+        pass  # Required in some versions
 
-    # test set 가져오기
+    # Get test set
     if hasattr(task_obj, "test_docs"):
         docs = list(task_obj.test_docs())
     elif hasattr(task_obj, "eval_docs"):
@@ -75,37 +75,37 @@ def load_task_docs(
     elif hasattr(task_obj, "validation_docs"):
         docs = list(task_obj.validation_docs())
     else:
-        raise ValueError(f"Task {task_name}에서 평가용 문서를 찾을 수 없습니다.")
+        raise ValueError(f"No evaluation documents found for task {task_name}.")
 
     if limit:
         docs = docs[:limit]
 
     results = []
     for doc in docs:
-        # 프롬프트 생성
+        # Generate prompt
         prompt = task_obj.doc_to_text(doc)
         if isinstance(prompt, list):
-            # chat format
+            # Chat format
             prompt = "\n".join(
                 f"{m.get('role', 'user')}: {m.get('content', '')}" for m in prompt
             )
 
-        # 정답 추출
+        # Extract target answer
         target = task_obj.doc_to_target(doc)
         if isinstance(target, list):
             target = target[0] if target else ""
         target = str(target).strip()
 
-        # fewshot 프롬프트 구성
+        # Build fewshot prompt
         if num_fewshot > 0 and hasattr(task_obj, "fewshot_context"):
             try:
                 ctx = task_obj.fewshot_context(doc, num_fewshot)
                 if ctx:
                     prompt = ctx
             except Exception:
-                pass  # fewshot 실패 시 zero-shot으로
+                pass  # Fall back to zero-shot if fewshot fails
 
-        # generation_kwargs에서 until 토큰 추출
+        # Extract stop tokens from generation_kwargs
         until = []
         if cfg and hasattr(cfg, "generation_kwargs") and cfg.generation_kwargs:
             until = cfg.generation_kwargs.get("until", [])
@@ -125,10 +125,10 @@ def load_task_docs(
 
 
 def extract_answer_label(text: str) -> str:
-    """응답에서 답변 레이블 (A, B, C, D 등) 추출"""
+    """Extract answer label (A, B, C, D, etc.) from response."""
     text = text.strip()
 
-    # 정확한 레이블 매칭: (A), (B), ... 또는 A, B, ...
+    # Exact label matching: (A), (B), ... or A, B, ...
     patterns = [
         r"\(([A-D])\)",  # (A), (B), (C), (D)
         r"^([A-D])[\s\.\)]",  # A. or A) at start
@@ -141,26 +141,26 @@ def extract_answer_label(text: str) -> str:
         if m:
             return m.group(1).upper()
 
-    return text[:50]  # fallback: 첫 50자
+    return text[:50]  # Fallback: first 50 characters
 
 
 def check_match(prediction: str, target: str) -> bool:
-    """예측과 정답의 매칭 여부 확인 (유연한 매칭)"""
+    """Check if prediction matches target (flexible matching)."""
     pred = prediction.strip().upper()
     tgt = target.strip().upper()
 
-    # 정확 일치
+    # Exact match
     if pred == tgt:
         return True
 
-    # 레이블 추출 후 비교
+    # Compare after label extraction
     pred_label = extract_answer_label(pred)
     tgt_label = extract_answer_label(tgt)
 
     if pred_label and tgt_label and pred_label == tgt_label:
         return True
 
-    # 괄호 제거 후 비교
+    # Compare after removing parentheses
     pred_clean = pred.replace("(", "").replace(")", "").strip()
     tgt_clean = tgt.replace("(", "").replace(")", "").strip()
     if pred_clean == tgt_clean:
@@ -182,23 +182,23 @@ def run_single_task(
     num_fewshot: int = 0,
     log_samples: bool = True,
 ) -> dict:
-    """단일 태스크에 대해 baseline vs interleaved 비교 실행"""
+    """Run baseline vs interleaved comparison for a single task."""
     logger.info(f"{'=' * 60}")
     logger.info(f"Task: {task_name}")
     logger.info(f"{'=' * 60}")
 
-    # 태스크 데이터 로드
+    # Load task data
     logger.info("Loading task data...")
     try:
         task_docs = load_task_docs(task_name, limit=limit, num_fewshot=num_fewshot)
     except Exception as e:
-        logger.error(f"Task {task_name} 로드 실패: {e}")
+        logger.error(f"Failed to load task {task_name}: {e}")
         return {"task": task_name, "error": str(e)}
 
     n_samples = len(task_docs)
     logger.info(f"Loaded {n_samples} samples")
 
-    # 결과 저장
+    # Store results
     baseline_correct = 0
     interleaved_correct = 0
     sample_logs = []
@@ -233,7 +233,7 @@ def run_single_task(
         if interleaved_match:
             interleaved_correct += 1
 
-        # 샘플별 로그
+        # Per-sample logging
         if log_samples:
             sample_logs.append(
                 {
@@ -256,7 +256,7 @@ def run_single_task(
                 }
             )
 
-    # 메트릭 계산
+    # Compute metrics
     baseline_acc = baseline_correct / n_samples if n_samples else 0
     interleaved_acc = interleaved_correct / n_samples if n_samples else 0
     delta = interleaved_acc - baseline_acc
@@ -289,7 +289,7 @@ def run_single_task(
 
 
 def print_results_table(results: list[dict]):
-    """결과를 보기 좋은 테이블로 출력"""
+    """Print results as a formatted table."""
     try:
         from tabulate import tabulate
     except ImportError:
@@ -322,53 +322,53 @@ def print_results_table(results: list[dict]):
     if tabulate:
         print(tabulate(rows, headers=headers, tablefmt="rounded_grid"))
     else:
-        # fallback: 간단한 테이블
+        # Fallback: simple table
         header_str = " | ".join(f"{h:<20}" for h in headers)
         print(header_str)
         print("-" * len(header_str))
         for row in rows:
             print(" | ".join(f"{str(v):<20}" for v in row))
 
-    # 통계 요약
+    # Statistics summary
     for r in results:
         if "error" in r:
             continue
         m = r["metrics"]
-        print(f"\n--- {r['task']} 상세 통계 ---")
+        print(f"\n--- {r['task']} Detailed Statistics ---")
         print(
-            f"  Interleaved 평균 confidence: {m['interleaved']['avg_confidence']:.3f}"
+            f"  Interleaved avg confidence:  {m['interleaved']['avg_confidence']:.3f}"
         )
-        print(f"  Interleaved retry 비율:      {m['interleaved']['retry_rate']:.1%}")
-        print(f"  Interleaved 총 API 호출:     {m['interleaved']['total_api_calls']}")
-        print(f"  Baseline 총 API 호출:        {m['baseline']['total_api_calls']}")
+        print(f"  Interleaved retry rate:      {m['interleaved']['retry_rate']:.1%}")
+        print(f"  Interleaved total API calls: {m['interleaved']['total_api_calls']}")
+        print(f"  Baseline total API calls:    {m['baseline']['total_api_calls']}")
         print(
             f"  Token overhead:              "
             f"{m['interleaved']['total_input_tokens'] + m['interleaved']['total_output_tokens']} "
             f"vs {m['baseline']['total_input_tokens'] + m['baseline']['total_output_tokens']}"
         )
 
-    # 잘/못 된 케이스 분석
+    # Correct/incorrect case analysis
     for r in results:
         if "error" in r or "samples" not in r:
             continue
         samples = r["samples"]
 
-        # Interleaved가 맞추고 Baseline이 틀린 케이스
+        # Cases where Interleaved was correct but Baseline was wrong
         fixed = [
             s for s in samples if s["interleaved_correct"] and not s["baseline_correct"]
         ]
-        # Baseline이 맞추고 Interleaved가 틀린 케이스
+        # Cases where Baseline was correct but Interleaved was wrong
         broken = [
             s for s in samples if not s["interleaved_correct"] and s["baseline_correct"]
         ]
 
-        print(f"\n--- {r['task']} 개선/퇴보 분석 ---")
-        print(f"  Interleaved가 추가로 맞춘 샘플: {len(fixed)}")
-        print(f"  Interleaved가 추가로 틀린 샘플: {len(broken)}")
-        print(f"  순 개선: {len(fixed) - len(broken)}")
+        print(f"\n--- {r['task']} Improvement / Regression Analysis ---")
+        print(f"  Additional samples Interleaved got correct: {len(fixed)}")
+        print(f"  Additional samples Interleaved got wrong:   {len(broken)}")
+        print(f"  Net improvement: {len(fixed) - len(broken)}")
 
         if fixed:
-            print("\n  [개선된 샘플 예시 (최대 3개)]")
+            print("\n  [Improved samples (up to 3)]")
             for s in fixed[:3]:
                 print(
                     f"    #{s['index']}: target={s['target']}, "
@@ -378,7 +378,7 @@ def print_results_table(results: list[dict]):
                 )
 
         if broken:
-            print("\n  [퇴보한 샘플 예시 (최대 3개)]")
+            print("\n  [Regressed samples (up to 3)]")
             for s in broken[:3]:
                 print(
                     f"    #{s['index']}: target={s['target']}, "
@@ -438,7 +438,7 @@ def main():
     )
     args = parser.parse_args()
 
-    # Config 로드
+    # Load config
     config_path = Path(args.config)
     if not config_path.exists():
         logger.error(f"Config not found: {config_path}")
@@ -461,10 +461,10 @@ def main():
         else interleaved_cfg["max_retries"]
     )
 
-    # API key 확인
+    # Verify API key
     if not os.environ.get("OPENAI_API_KEY") and not model_cfg.get("api_base"):
         logger.error(
-            "OPENAI_API_KEY 환경변수를 설정하거나 config에 api_base를 지정하세요."
+            "Set the OPENAI_API_KEY environment variable or specify api_base in config."
         )
         sys.exit(1)
 
@@ -477,7 +477,7 @@ def main():
     logger.info(f"Retries:   {max_retries}")
     logger.info(f"Limit:     {limit or 'all'}")
 
-    # 모델 초기화
+    # Initialize models
     common_kwargs = dict(
         model_name=model_cfg["model_name"],
         api_base=model_cfg.get("api_base"),
@@ -485,8 +485,8 @@ def main():
         max_tokens=model_cfg.get("max_tokens", 1024),
     )
 
-    # ── Baseline에도 structured output + system prompt 사용
-    # (공정한 비교를 위해 동일한 시스템 프롬프트 사용)
+    # ── Use structured output + system prompt for Baseline as well
+    # (Use the same system prompt for a fair comparison)
     answer_system_prompt = (
         "You are an expert at answering questions. "
         "Read the question carefully and provide ONLY the answer label "
@@ -508,12 +508,12 @@ def main():
         confidence_guide=interleaved_cfg.get("confidence_guide", ""),
     )
 
-    # 태스크별 실행
+    # Run per task
     all_results = []
     start_time = time.time()
 
     for task_name in tasks:
-        # 태스크마다 stats 리셋
+        # Reset stats for each task
         baseline_lm.stats = __import__("confidence_model").CallStats()
         interleaved_lm.stats = __import__("confidence_model").CallStats()
 
@@ -529,11 +529,11 @@ def main():
 
     elapsed = time.time() - start_time
 
-    # 결과 출력
+    # Print results
     print_results_table(all_results)
     logger.info(f"Total time: {elapsed:.1f}s")
 
-    # JSON으로 저장
+    # Save as JSON
     output_path = args.output or os.path.join(
         eval_cfg.get("output_dir", "./results"),
         f"benchmark_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json",
@@ -551,7 +551,7 @@ def main():
         "results": all_results,
     }
 
-    # samples에서 doc 제거 (직렬화 문제 방지)
+    # Remove doc from samples (to avoid serialization issues)
     for r in output_data["results"]:
         if "samples" in r:
             for s in r["samples"]:
